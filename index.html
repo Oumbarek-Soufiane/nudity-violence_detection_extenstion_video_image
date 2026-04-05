@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SafeSurf Live Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background-color: #f0f2f5; 
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            color: #1a1a1a;
+            margin-bottom: 30px;
+        }
+
+        .feed {
+            width: 100%;
+            max-width: 500px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .post {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+            padding: 15px;
+            position: relative; /* Added so we can position the warning overlay */
+        }
+
+        .post-image {
+            width: 100%;
+            height: 300px;
+            object-fit: cover;
+            border-radius: 4px;
+            display: block;
+            transition: filter 0.3s ease; 
+            filter: blur(40px); /* 👈 ADD THIS: Everything starts blurred */
+        }
+        
+        .warning-overlay {
+            display: none; 
+            position: absolute; 
+            top: 15px; 
+            left: 15px; 
+            right: 15px; 
+            bottom: 15px; 
+            background: rgba(0, 0, 0, 0.85); 
+            color: white; 
+            flex-direction: column; 
+            justify-content: center; 
+            align-items: center; 
+            text-align: center;
+            border-radius: 4px;
+            z-index: 1000000000;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>SafeSurf Live Detection Demo</h1>
+
+    <div class="feed">
+        
+        <div class="post">
+            <div class="user-info">
+                <div class="avatar" style="background: #e91e63"></div>
+                <div class="username">News Alert</div>
+            </div>
+            <img class="post-image" crossorigin="anonymous" src="https://cdn.pixabay.com/photo/2020/01/19/14/04/killer-4777939_1280.jpg" alt="City">
+            <div class="caption">Violence</div>
+        </div>
+
+        <div class="post">
+            <video id="auto-test-video" class="post-image" src="violence.mp4" autoplay muted loop controls></video>
+            <div id="block-overlay" class="warning-overlay">
+                <h2 style="color: #ff4444; margin-bottom: 10px;">⚠️ BLOCKED</h2>
+                <p id="block-reason">Inappropriate content detected.</p>
+            </div>
+        </div>
+
+    </div>
+
+    <canvas id="hidden-canvas" style="display:none;"></canvas>
+
+    <script>
+        const canvas = document.getElementById('hidden-canvas');
+        const ctx = canvas.getContext('2d');
+
+        // ==========================================
+        // 1. IMAGE SCANNING LOGIC
+        // ==========================================
+        async function scanImages() {
+            console.log("🖼️ Starting Image Scans...");
+            const images = document.querySelectorAll('img.post-image');
+            
+            for (const img of images) {
+                // Force bypass browser cache to ensure CORS headers are fetched
+                const originalSrc = img.src;
+                img.src = originalSrc + (originalSrc.includes('?') ? '&' : '?') + 'nocache=' + new Date().getTime();
+
+                if (!img.complete) {
+                    await new Promise((resolve) => {
+                        img.onload = resolve;
+                        img.onerror = resolve; 
+                    });
+                }
+
+                try {
+                    // Draw image to hidden canvas
+                    canvas.width = img.naturalWidth || img.width;
+                    canvas.height = img.naturalHeight || img.height;
+                    ctx.drawImage(img, 0, 0);
+                    
+                    // Add a safety check: Is the canvas tainted?
+                    let base64Data;
+                    try {
+                        base64Data = canvas.toDataURL('image/jpeg').split(',')[1];
+                    } catch (canvasError) {
+                        console.warn("⚠️ Canvas is tainted for this image. Skipping.", img.src);
+                        continue; // Skip to the next image instead of crashing
+                    }
+
+                    // Send to backend
+                    const response = await fetch('http://localhost:3002/api/analyze-image', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: base64Data, mimeType: 'image/jpeg' })
+                    });
+
+                    // If the server crashes (500), catch it gracefully
+                    if (!response.ok) {
+                        console.error(`❌ Server returned ${response.status} for image scan.`);
+                        continue; 
+                    }
+
+                    const data = await response.json();
+
+                    if (data.result && data.result.isSafe === false) {
+                        console.log("🚨 UNSAFE IMAGE DETECTED! Keeping blur.");
+                        const postDiv = img.closest('.post');
+                        const overlay = document.createElement('div');
+                        overlay.className = 'warning-overlay';
+                        overlay.style.display = 'flex';
+                        overlay.innerHTML = `
+                            <h2 style="color: #ff4444; margin-bottom: 10px;">⚠️ BLOCKED</h2>
+                            <p>${data.result.reason || "Inappropriate content detected."}</p>
+                        `;
+                        postDiv.appendChild(overlay);
+                    } else {
+                        console.log("✅ Image is safe. Removing blur.");
+                        img.style.filter = 'none';
+                    }
+                } catch (error) {
+                    console.error("❌ Image scan failed:", error);
+                }
+            }
+        }
+
+        // Run the image scanner as soon as the window loads
+        window.addEventListener('load', scanImages);
+
+        // ==========================================
+        // 2. VIDEO SCANNING LOGIC
+        // ==========================================
+        const video = document.getElementById('auto-test-video');
+        const overlay = document.getElementById('block-overlay');
+
+        video.addEventListener('play', async () => {
+            console.log("🚀 Starting Full Video Safety Scan...");
+
+            try {
+                const response = await fetch('http://localhost:3002/api/analyze-full-video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                // 👈 NEW LOGIC HERE
+                if (data.flagged) {
+                    console.log("🚨 THREAT DETECTED BY FULL SCAN!");
+                    
+                    video.pause(); 
+                    // Video is already blurred by CSS, so we just show the overlay
+                    overlay.style.display = 'flex'; 
+                    document.getElementById('block-reason').innerText = data.reason || "Violence detected in video.";
+                } else {
+                    console.log("✅ Video passed full safety check. Removing blur.");
+                    video.style.filter = 'none'; // 👈 Un-blur the video!
+                }
+            } catch (error) {
+                console.error('❌ Could not reach backend for video:', error);
+            }
+        }, { once: true });
+
+    </script>
+</body>
+</html>
